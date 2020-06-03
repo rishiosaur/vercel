@@ -20,6 +20,8 @@ import { ChildProcess } from 'child_process';
 import isPortReachable from 'is-port-reachable';
 import which from 'which';
 
+import { ProjectEnvTarget, Project } from '../../types';
+
 import { getVercelIgnore, fileNameSymbol } from '@vercel/client';
 import {
   getTransformedRoutes,
@@ -92,6 +94,10 @@ import {
   HttpHeadersConfig,
   EnvConfigs,
 } from './types';
+
+import Client from '../../util/client';
+import getEnvVariables from '../../util/env/get-env-records';
+import getDecryptedSecret from '../../util/env/get-decrypted-secret';
 
 interface FSEvent {
   type: string;
@@ -169,7 +175,6 @@ export default class DevServer {
     this.buildMatches = new Map();
     this.inProgressBuilds = new Map();
     this.devCacheDir = join(getVercelDirectory(cwd), 'cache');
-
     this.getNowConfigPromise = null;
     this.blockingBuildsPromise = null;
     this.updateBuildersPromise = null;
@@ -747,7 +752,11 @@ export default class DevServer {
   /**
    * Launches the `vercel dev` server.
    */
-  async start(...listenSpec: ListenSpec): Promise<void> {
+  async start(
+    client: Client,
+    project: null | Project /* FIX: Better way to get ID/client? */,
+    ...listenSpec: ListenSpec
+  ): Promise<void> {
     if (!fs.existsSync(this.cwd)) {
       throw new Error(`${chalk.bold(this.cwd)} doesn't exist`);
     }
@@ -762,10 +771,28 @@ export default class DevServer {
     // Retrieve the path of the native module
     const nowConfig = await this.getNowConfig(false);
     const nowConfigBuild = nowConfig.build || {};
-    const [runEnv, buildEnv] = await Promise.all([
-      this.getLocalEnv('.env', nowConfig.env),
-      this.getLocalEnv('.env.build', nowConfigBuild.env),
-    ]);
+    const localEnvVars = await this.getLocalEnv('.env', nowConfig.env);
+    const localBuildEnvVars = await this.getLocalEnv(
+      '.env.build',
+      nowConfigBuild.env
+    );
+
+    const cloudEnvVariables = await fetchAndDecryptEnvVars(
+      this.output,
+      client,
+      project,
+      4,
+      ProjectEnvTarget.Development
+    );
+
+    // if local .env/.env.build file exists, don't use cloud variables
+    const runEnv = Object.keys(localEnvVars).length
+      ? localEnvVars
+      : cloudEnvVariables;
+    const buildEnv = Object.keys(localBuildEnvVars).length
+      ? localBuildEnvVars
+      : cloudEnvVariables;
+
     const allEnv = { ...buildEnv, ...runEnv };
     Object.assign(process.env, allEnv);
     this.envConfigs = { buildEnv, runEnv, allEnv };
@@ -2215,4 +2242,46 @@ function hasNewRoutingProperties(nowConfig: NowConfig) {
     typeof nowConfig.rewrites !== undefined ||
     typeof nowConfig.trailingSlash !== undefined
   );
+}
+
+async function fetchAndDecryptEnvVars(
+  output: Output,
+  client: Client,
+  project: null | Project,
+  apiVersion: string | number,
+  target: ProjectEnvTarget
+): Promise<Env> {
+  if (!project || !project.id) {
+    return {};
+  }
+
+  const envs = await getEnvVariables(output, client, project.id, 4, target);
+  const decryptedValues = await Promise.all(
+    envs.map(async (env: { value: string }) => {
+      try {
+        const value = await getDecryptedSecret(output, client, env.value);
+        return { value, found: true };
+      } catch (error) {
+        if (error && error.status === 404) {
+          return { value: '', found: false };
+        } else {
+          throw error;
+        }
+      }
+    })
+  );
+  const results: Env = {};
+
+  for (let i = 0; i < decryptedValues.length; i++) {
+    const { key } = envs[i];
+    const { value, found } = decryptedValues[i] as {
+      value: string;
+      found: boolean;
+    };
+    if (found) {
+      results[key] = value;
+    }
+  }
+
+  return results;
 }

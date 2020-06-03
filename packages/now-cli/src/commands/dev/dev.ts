@@ -4,6 +4,7 @@ import DevServer from '../../util/dev/server';
 import parseListen from '../../util/dev/parse-listen';
 import { Output } from '../../util/output';
 import { NowContext } from '../../types';
+
 import Client from '../../util/client';
 import { getLinkedProject } from '../../util/projects/link';
 import { getFrameworks } from '../../util/get-frameworks';
@@ -86,5 +87,5 @@ export default async function dev(
   process.once('SIGINT', () => devServer.stop());
   process.once('SIGTERM', () => devServer.stop());
 
-  await devServer.start(...listen);
+  await devServer.start(client, link.project, ...listen);
 }
